@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from kornia import augmentation as augs
 from kornia import filters, color
-
+import wandb
 # helper functions
 
 def default(val, def_val):
@@ -179,6 +179,7 @@ class BYOL(nn.Module):
         device = get_module_device(net)
         self.to(device)
 
+        wandb.watch(self.online_encoder, self.target_encoder, self.online_predictor)
         # send a mock image tensor to instantiate singleton parameters
         self.forward(torch.randn(2, 3, image_size, image_size, device=device))
 
