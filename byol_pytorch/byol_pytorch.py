@@ -1,21 +1,26 @@
 import copy
 import random
+
 from functools import wraps
 
+import wandb
 import torch
-from torch import nn
 import torch.nn.functional as F
 
-from kornia import augmentation as augs
-from kornia import filters, color
-import wandb
+from torch import nn
+
+# from kornia import augmentation as augs, color, filters
+
 # helper functions
+
 
 def default(val, def_val):
     return def_val if val is None else val
 
+
 def flatten(t):
     return t.reshape(t.shape[0], -1)
+
 
 def singleton(cache_key):
     def inner_fn(fn):
@@ -31,14 +36,17 @@ def singleton(cache_key):
         return wrapper
     return inner_fn
 
+
 def get_module_device(module):
     return next(module.parameters()).device
+
 
 def set_requires_grad(model, val):
     for p in model.parameters():
         p.requires_grad = val
 
 # loss fn
+
 
 def loss_fn(x, y):
     x = F.normalize(x, dim=-1, p=2)
@@ -47,17 +55,20 @@ def loss_fn(x, y):
 
 # augmentation utils
 
+
 class RandomApply(nn.Module):
     def __init__(self, fn, p):
         super().__init__()
         self.fn = fn
         self.p = p
+
     def forward(self, x):
         if random.random() > self.p:
             return x
         return self.fn(x)
 
 # exponential moving average
+
 
 class EMA():
     def __init__(self, beta):
@@ -69,6 +80,7 @@ class EMA():
             return new
         return old * self.beta + (1 - self.beta) * new
 
+
 def update_moving_average(ema_updater, ma_model, current_model):
     for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
         old_weight, up_weight = ma_params.data, current_params.data
@@ -76,8 +88,9 @@ def update_moving_average(ema_updater, ma_model, current_model):
 
 # MLP class for projector and predictor
 
+
 class MLP(nn.Module):
-    def __init__(self, dim, projection_size, hidden_size = 4096):
+    def __init__(self, dim, projection_size, hidden_size=4096):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_size),
@@ -93,11 +106,12 @@ class MLP(nn.Module):
 # will manage the interception of the hidden layer output
 # and pipe it into the projecter and predictor nets
 
+
 class NetWrapper(nn.Module):
-    def __init__(self, net, projection_size, projection_hidden_size, layer = -2):
+    def __init__(self, net, projection_size, projection_hidden_size, layer=-2):
         super().__init__()
         self.net = net
-        self.layer = layer
+        self.layer = layer  # final avg-pooling layer
 
         self.projector = None
         self.projection_size = projection_size
@@ -151,37 +165,48 @@ class NetWrapper(nn.Module):
 
 # main class
 
+
 class BYOL(nn.Module):
-    def __init__(self, net, image_size, hidden_layer = -2, projection_size = 256, projection_hidden_size = 4096, augment_fn = None, augment_fn2 = None, moving_average_decay = 0.99):
+    def __init__(self, net, image_size, grayscale=True, hidden_layer=-2, projection_size=256, projection_hidden_size=4096, augment_fn=None, augment_fn2=None, moving_average_decay=0.99):
         super().__init__()
 
         # default SimCLR augmentation
 
         DEFAULT_AUG = nn.Sequential(
-            RandomApply(augs.ColorJitter(0.8, 0.8, 0.8, 0.2), p=0.8),
-            augs.RandomGrayscale(p=0.2),
-            augs.RandomHorizontalFlip(),
-            RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
-            augs.RandomResizedCrop((image_size, image_size)),
-            augs.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225]))
+            # RandomApply(augs.ColorJitter(0.8, 0.8, 0.8, 0.2), p=0.8),
+            # augs.RandomHorizontalFlip(),
+            # RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
+            # augs.RandomResizedCrop(
+            #     size=(image_size, image_size), scale=(0.84, 1.), ratio=(1,1))
+            # augs.Normalize(mean=torch.tensor(
+            #     [0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225]))
         )
 
         self.augment1 = default(augment_fn, DEFAULT_AUG)
         self.augment2 = default(augment_fn2, self.augment1)
 
-        self.online_encoder = NetWrapper(net, projection_size, projection_hidden_size, layer=hidden_layer)
+        self.online_encoder = NetWrapper(
+            net, projection_size, projection_hidden_size, layer=hidden_layer)
         self.target_encoder = None
         self.target_ema_updater = EMA(moving_average_decay)
 
-        self.online_predictor = MLP(projection_size, projection_size, projection_hidden_size)
+        self.online_predictor = MLP(
+            projection_size, projection_size, projection_hidden_size)
 
         # get device of network and make wrapper same device
         device = get_module_device(net)
         self.to(device)
 
-        wandb.watch(self.online_encoder, self.target_encoder, self.online_predictor)
+        # wandb.watch(self.online_encoder, self.target_encoder,
+        #             self.online_predictor)
+
         # send a mock image tensor to instantiate singleton parameters
-        self.forward(torch.randn(2, 3, image_size, image_size, device=device))
+        if grayscale:
+            nr_channels = 1
+        else:
+            nr_channels = 3
+        self.forward(torch.randn(2, 3,
+                                 image_size, image_size, device=device).double())
 
     @singleton('target_encoder')
     def _get_target_encoder(self):
@@ -195,7 +220,8 @@ class BYOL(nn.Module):
 
     def update_moving_average(self):
         assert self.target_encoder is not None, 'target encoder has not been created yet'
-        update_moving_average(self.target_ema_updater, self.target_encoder, self.online_encoder)
+        update_moving_average(self.target_ema_updater,
+                              self.target_encoder, self.online_encoder)
 
     def forward(self, x):
         image_one, image_two = self.augment1(x), self.augment2(x)
