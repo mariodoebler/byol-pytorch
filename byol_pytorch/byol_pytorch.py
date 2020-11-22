@@ -8,8 +8,13 @@ import torch
 import torch.nn.functional as F
 
 from torch import nn
+from atariari.methods.utils import EarlyStopping
 
-# from kornia import augmentation as augs, color, filters
+# from kornia import augmentation as augs
+import numpy as np
+
+from kornia import augmentation as augs, color, filters
+from torch.utils.data import BatchSampler, RandomSampler
 
 # helper functions
 
@@ -167,19 +172,23 @@ class NetWrapper(nn.Module):
 
 
 class BYOL(nn.Module):
-    def __init__(self, net, image_size, grayscale=True, hidden_layer=-2, projection_size=256, projection_hidden_size=4096, augment_fn=None, augment_fn2=None, moving_average_decay=0.99):
+    def __init__(self, net, image_size, grayscale=True, num_frame_stack=1, batch_size=64, hidden_layer=-2, projection_size=256, projection_hidden_size=4096, augment_fn=None, augment_fn2=None, moving_average_decay=0.99, wandb=None):
         super().__init__()
 
         # default SimCLR augmentation
 
+        #####
+        # IMPORTANT for kornia: parameters are often float!! e.g. 1. vs 1
         DEFAULT_AUG = nn.Sequential(
             # RandomApply(augs.ColorJitter(0.8, 0.8, 0.8, 0.2), p=0.8),
             # augs.RandomHorizontalFlip(),
             # RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
+            # input tensor: float + normalized range [0,1]
             # augs.RandomResizedCrop(
-            #     size=(image_size, image_size), scale=(0.84, 1.), ratio=(1,1))
+            #     size=(image_size, image_size), scale=(0.84, 1.), ratio=(1.,1.), p=1.0)
             # augs.Normalize(mean=torch.tensor(
             #     [0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225]))
+
         )
 
         self.augment1 = default(augment_fn, DEFAULT_AUG)
@@ -193,20 +202,26 @@ class BYOL(nn.Module):
         self.online_predictor = MLP(
             projection_size, projection_size, projection_hidden_size)
 
+        self.batch_size = batch_size
         # get device of network and make wrapper same device
-        device = get_module_device(net)
-        self.to(device)
+        self.device = get_module_device(net)
+        print(f"Device is {self.device.type}")
+        self.to(self.device)
+        self.wandb = wandb
+        self.early_stopper = EarlyStopping(
+            patience=15, verbose=False, wandb=self.wandb, name="encoder-byol")
 
-        # wandb.watch(self.online_encoder, self.target_encoder,
-        #             self.online_predictor)
-
+        if self.wandb:
+            wandb.watch(self.online_encoder, self.target_encoder,
+                        self.online_predictor)
         # send a mock image tensor to instantiate singleton parameters
-        if grayscale:
-            nr_channels = 1
-        else:
-            nr_channels = 3
-        self.forward(torch.randn(2, 3,
-                                 image_size, image_size, device=device).double())
+        assert grayscale
+        nr_channels = num_frame_stack
+        self.forward(torch.rand(batch_size, nr_channels,
+                                210, 160, device=self.device))
+        self.opt = torch.optim.Adam(self.parameters(), lr=3e-4)
+        print(
+            f"Finished Initialization of BYOL with model {self.online_encoder.net.__class__.__name__}")
 
     @singleton('target_encoder')
     def _get_target_encoder(self):
@@ -242,3 +257,54 @@ class BYOL(nn.Module):
 
         loss = loss_one + loss_two
         return loss.mean()
+
+    def logResults(self, epoch_idx, epoch_loss, prefix=""):
+        print(f"{prefix} Epoch: {epoch_idx}, Loss: {epoch_loss}")
+        if self.wandb:
+            self.wandb.log({prefix + '_loss': epoch_loss},
+                           step=epoch_idx, commit=False)
+
+    def doOneEpoch(self, nr_epoch, episodes):
+        mode = "train" if self.training else "val"
+        data_generator = generate_batch(episodes, self.batch_size, self.device)
+        for steps, batch in enumerate(data_generator):
+            print(f"batch nr {steps} for mode {mode}")
+            loss = self(batch)
+            self.opt.zero_grad()
+            loss.backward()
+            self.opt.step()
+            self.update_moving_average()  # update moving average of target encoder
+        self.logResults(nr_epoch, loss / steps, prefix=mode)
+        if mode == "val":
+            self.early_stopper(-loss / steps, self.online_encoder)
+
+
+def generate_batch(episodes, batch_size, device):
+    total_steps = sum([len(e) for e in episodes])
+    print('Total Steps: {}'.format(total_steps))
+    # Episode sampler
+    # Sample `num_samples` episodes then batchify them with `self.batch_size` episodes per batch
+    sampler = BatchSampler(RandomSampler(range(len(episodes)),
+                                         replacement=True, num_samples=total_steps),
+                           batch_size, drop_last=True)
+    for nr, indices in enumerate(sampler):
+        x = []
+        episodes_batch = [episodes[i] for i in indices]
+        print(f"indices in sampler nr {nr} are {*indices,}")
+        for e in episodes_batch:
+            t = np.random.randint(0, len(e))
+            x.append(e[t])
+        yield torch.stack(x).float().to(device) / 255.  # SCALING!!!!
+    # for indices in sampler:
+    #     episodes_batch = [episodes[x] for x in indices]
+    #     x_t, x_tprev, x_that, ts, thats = [], [], [], [], []
+    #     for episode in episodes_batch:
+    #         # Get one sample from this episode
+    #         t, t_hat = 0, 0
+    #         t, t_hat = np.random.randint(
+    #             0, len(episode)), np.random.randint(0, len(episode))
+    #         x_t.append(episode[t])
+
+    #         x_tprev.append(episode[t - 1])
+    #         ts.append([t])
+    #     yield torch.stack(x_t).float().to(device) / 255., torch.stack(x_tprev).float().to(device) / 255.
