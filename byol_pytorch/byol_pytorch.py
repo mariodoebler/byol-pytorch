@@ -1,22 +1,20 @@
 import copy
-import random
 
 from functools import wraps
 
+import numpy as np
+
 import wandb
+import torchvision
 import torch
 import torch.nn.functional as F
 
-from torch import nn
+from kornia import enhance, filters
+from torchvision.transforms import RandomApply, RandomChoice
 from atariari.methods.utils import EarlyStopping
 
-# from kornia import augmentation as augs
-import numpy as np
-
-from kornia import augmentation as augs, color, filters
+from torch import nn
 from torch.utils.data import BatchSampler, RandomSampler
-
-# helper functions
 
 
 def default(val, def_val):
@@ -61,19 +59,19 @@ def loss_fn(x, y):
 # augmentation utils
 
 
-class RandomApply(nn.Module):
-    def __init__(self, fn, p):
-        super().__init__()
-        self.fn = fn
-        self.p = p
+# class RandomApply(nn.Module):
+#     def __init__(self, fn, p):
+#         super().__init__()
+#         self.fn = fn
+#         self.p = p
 
-    def forward(self, x):
-        if random.random() > self.p:
-            return x
-        return self.fn(x)
+#     def forward(self, x):
+#         if random.random() > self.p:
+#             return x
+#         return self.fn(x)
+
 
 # exponential moving average
-
 
 class EMA():
     def __init__(self, beta):
@@ -179,19 +177,47 @@ class BYOL(nn.Module):
 
         #####
         # IMPORTANT for kornia: parameters are often float!! e.g. 1. vs 1
-        DEFAULT_AUG = nn.Sequential(
-            # RandomApply(augs.ColorJitter(0.8, 0.8, 0.8, 0.2), p=0.8),
-            # augs.RandomHorizontalFlip(),
-            # RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
-            # input tensor: float + normalized range [0,1]
-            # augs.RandomResizedCrop(
-            #     size=(image_size, image_size), scale=(0.84, 1.), ratio=(1.,1.), p=1.0)
-            # augs.Normalize(mean=torch.tensor(
-            #     [0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225]))
+        # DEFAULT_AUG = nn.Sequential(
+        # RandomApply(augs.ColorJitter(0.8, 0.8, 0.8, 0.2), p=0.8),
+        # augs.RandomHorizontalFlip(),
+        # RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
+        # input tensor: float + normalized range [0,1]
+        # augs.RandomResizedCrop(
+        #     size=(image_size, image_size), scale=(0.84, 1.), ratio=(1.,1.), p=1.0)
+        # augs.Normalize(mean=torch.tensor(
+        #     [0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225]))
+        # )
 
-        )
+        kernel_size = (9, 9)  # has to be ODD
+        kernel_std = np.random.uniform(low=0.1, high=2.0)
+        kernel_std = (kernel_std,)*2
+        aug_transform = torchvision.transforms.Compose([
+            RandomChoice(
+                [enhance.AdjustBrightness(0.4),
+                 enhance.AdjustBrightness(0.3),
+                 enhance.AdjustBrightness(0.2),
+                 enhance.AdjustBrightness(0.1),
+                 enhance.AdjustBrightness(0.0)]
+            ),
+            RandomChoice(
+                [enhance.AdjustContrast(1.0),
+                 enhance.AdjustContrast(0.9),
+                 enhance.AdjustContrast(0.8),
+                 enhance.AdjustContrast(0.7),
+                 enhance.AdjustContrast(0.6)]
+            ),
+            RandomApply([filters.GaussianBlur2d(
+                kernel_size, kernel_std)], p=0.5)
+            # RandomChoice(
+            #     [enhance.AdjustContrast(1.0),
+            #      enhance.AdjustContrast(1.0),
+            #      enhance.AdjustContrast(1.0),
+            #      filters.GaussianBlur2d((1, 1), (1, 1)),
+            #      filters.GaussianBlur2d((3, 3), (1.5, 1.5))]
+            # )
+        ])
 
-        self.augment1 = default(augment_fn, DEFAULT_AUG)
+        self.augment1 = default(augment_fn, aug_transform)
         self.augment2 = default(augment_fn2, self.augment1)
 
         self.online_encoder = NetWrapper(
@@ -204,7 +230,8 @@ class BYOL(nn.Module):
 
         self.batch_size = batch_size
         # get device of network and make wrapper same device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(
+            'cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Device is {self.device.type}")
         self.to(self.device)
         self.wandb = wandb
