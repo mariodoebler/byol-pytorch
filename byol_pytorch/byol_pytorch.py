@@ -204,7 +204,7 @@ class BYOL(nn.Module):
 
         self.batch_size = batch_size
         # get device of network and make wrapper same device
-        self.device = get_module_device(net)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Device is {self.device.type}")
         self.to(self.device)
         self.wandb = wandb
