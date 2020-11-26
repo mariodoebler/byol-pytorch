@@ -170,7 +170,7 @@ class NetWrapper(nn.Module):
 
 
 class BYOL(nn.Module):
-    def __init__(self, net, image_size, grayscale=True, num_frame_stack=1, batch_size=64, hidden_layer=-2, projection_size=256, projection_hidden_size=4096, augment_fn=None, augment_fn2=None, moving_average_decay=0.99, wandb=None):
+    def __init__(self, net, image_size, grayscale=True, num_frame_stack=1, batch_size=64, hidden_layer=-2, projection_size=256, projection_hidden_size=4096, augment_fn=None, augment_fn2=None, moving_average_decay=0.99, wandb=None, patience=15):
         super().__init__()
 
         # default SimCLR augmentation
@@ -236,7 +236,7 @@ class BYOL(nn.Module):
         self.to(self.device)
         self.wandb = wandb
         self.early_stopper = EarlyStopping(
-            patience=15, verbose=False, wandb=self.wandb, name="encoder-byol")
+            patience=patience, verbose=False, wandb=self.wandb, name="encoder-byol")
 
         if self.wandb:
             wandb.watch(self.online_encoder, self.target_encoder,
