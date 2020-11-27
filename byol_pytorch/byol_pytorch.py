@@ -317,21 +317,8 @@ def generate_batch(episodes, batch_size, device):
     for nr, indices in enumerate(sampler):
         x = []
         episodes_batch = [episodes[i] for i in indices]
-        print(f"indices in sampler nr {nr} are {*indices,}")
+        # print(f"indices in sampler nr {nr} are {*indices,}")
         for e in episodes_batch:
             t = np.random.randint(0, len(e))
             x.append(e[t])
         yield torch.stack(x).float().to(device) / 255.  # SCALING!!!!
-    # for indices in sampler:
-    #     episodes_batch = [episodes[x] for x in indices]
-    #     x_t, x_tprev, x_that, ts, thats = [], [], [], [], []
-    #     for episode in episodes_batch:
-    #         # Get one sample from this episode
-    #         t, t_hat = 0, 0
-    #         t, t_hat = np.random.randint(
-    #             0, len(episode)), np.random.randint(0, len(episode))
-    #         x_t.append(episode[t])
-
-    #         x_tprev.append(episode[t - 1])
-    #         ts.append([t])
-    #     yield torch.stack(x_t).float().to(device) / 255., torch.stack(x_tprev).float().to(device) / 255.
